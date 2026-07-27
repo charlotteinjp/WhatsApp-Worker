@@ -4,6 +4,8 @@ const http = require('http');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const mysql = require('mysql2/promise');
 const bcrypt = require('bcryptjs');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
@@ -26,6 +28,7 @@ app.get('/', (req, res) => {
   res.json({ status: 'WhatsApp Server Running' });
 });
 
+// Database connections
 const userPool = mysql.createPool({
   host: process.env.DB_HOST || 'localhost',
   user: process.env.DB_USER || 'root',
@@ -44,6 +47,7 @@ const whatsappPool = mysql.createPool({
   connectionLimit: 5
 });
 
+// Login
 app.post('/api/login', async (req, res) => {
   const { username, password } = req.body;
   
@@ -74,8 +78,6 @@ app.post('/api/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid username or password' });
     }
     
-    console.log(`Login: ${user.username}`);
-    
     res.json({
       success: true,
       username: user.username,
@@ -89,6 +91,7 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
+// Messages
 async function saveMessage(sender, body, timestamp) {
   try {
     const [existing] = await whatsappPool.execute(
@@ -127,24 +130,27 @@ async function getRecentMessages(limit = 50) {
   }
 }
 
-const fs = require('fs');
-const path = require('path');
-
-// Find Chrome in Render's cache
+// Find Chrome
 function findChrome() {
   const cachePath = '/opt/render/.cache/puppeteer/chrome';
   
   if (fs.existsSync(cachePath)) {
-    const versions = fs.readdirSync(cachePath);
-    for (const version of versions) {
-      const chromePath = path.join(cachePath, version, 'chrome-linux64', 'chrome');
-      if (fs.existsSync(chromePath)) {
-        console.log('Found Chrome at:', chromePath);
-        return chromePath;
+    try {
+      const versions = fs.readdirSync(cachePath);
+      for (const version of versions) {
+        const chromePath = path.join(cachePath, version, 'chrome-linux64', 'chrome');
+        if (fs.existsSync(chromePath)) {
+          console.log('Found Chrome at:', chromePath);
+          return chromePath;
+        }
       }
+    } catch (e) {
+      console.log('Error finding Chrome:', e.message);
     }
   }
-  return null;
+  
+  console.log('Chrome not found in cache, using default');
+  return undefined;
 }
 
 // WhatsApp Client
@@ -152,7 +158,7 @@ const client = new Client({
   authStrategy: new LocalAuth(),
   puppeteer: {
     headless: true,
-    executablePath: findChrome() || undefined,
+    executablePath: findChrome(),
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
