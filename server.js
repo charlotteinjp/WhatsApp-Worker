@@ -22,12 +22,10 @@ const io = new Server(server, {
 
 app.use(express.json());
 
-// Health check
 app.get('/', (req, res) => {
   res.json({ status: 'WhatsApp Server Running' });
 });
 
-// Database connections
 const userPool = mysql.createPool({
   host: process.env.DB_HOST || 'localhost',
   user: process.env.DB_USER || 'root',
@@ -46,7 +44,6 @@ const whatsappPool = mysql.createPool({
   connectionLimit: 5
 });
 
-// Login route
 app.post('/api/login', async (req, res) => {
   const { username, password } = req.body;
   
@@ -77,7 +74,7 @@ app.post('/api/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid username or password' });
     }
     
-    console.log(`✅ Login: ${user.username}`);
+    console.log(`Login: ${user.username}`);
     
     res.json({
       success: true,
@@ -92,7 +89,6 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-// WhatsApp message functions
 async function saveMessage(sender, body, timestamp) {
   try {
     const [existing] = await whatsappPool.execute(
@@ -131,7 +127,7 @@ async function getRecentMessages(limit = 50) {
   }
 }
 
-// WhatsApp Client with Render-compatible Puppeteer config
+// SIMPLE CONFIG - Let puppeteer handle Chrome
 const client = new Client({
   authStrategy: new LocalAuth(),
   puppeteer: {
@@ -139,29 +135,18 @@ const client = new Client({
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-gpu',
-      '--single-process'
-    ],
-    // THIS IS THE KEY FIX FOR RENDER
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || 
-      process.env.CHROME_BIN || 
-      null
+      '--disable-dev-shm-usage'
+    ]
   }
 });
 
 client.on('qr', (qr) => {
-  console.log('\n📱 SCAN THIS QR CODE WITH WHATSAPP\n');
-  try {
-    require('qrcode-terminal').generate(qr, { small: true });
-  } catch (e) {
-    console.log('QR:', qr.substring(0, 100) + '...');
-  }
+  console.log('\nSCAN THIS QR CODE WITH WHATSAPP\n');
   io.emit('qr', qr);
 });
 
 client.on('ready', () => {
-  console.log('✅ WhatsApp connected!');
+  console.log('WhatsApp connected!');
   io.emit('ready');
 });
 
@@ -181,7 +166,6 @@ client.on('message', async (message) => {
           timestamp: new Date(timestamp).toISOString(),
           isHistorical: false
         });
-        console.log(`📨 ${sender}: ${message.body.substring(0, 50)}`);
       }
     } catch (err) {
       console.error('Message error:', err.message);
@@ -194,9 +178,8 @@ client.on('disconnected', (reason) => {
   setTimeout(() => client.initialize(), 5000);
 });
 
-// Socket.IO
 io.on('connection', async (socket) => {
-  console.log('🟢 Client connected:', socket.id);
+  console.log('Client connected');
   
   if (client.info) {
     socket.emit('ready');
@@ -206,9 +189,8 @@ io.on('connection', async (socket) => {
   }
 });
 
-// Start
 const PORT = process.env.PORT || 10000;
 server.listen(PORT, () => {
-  console.log(`\n🚀 Server running on port ${PORT}\n`);
+  console.log(`Server running on port ${PORT}`);
   client.initialize();
 });
