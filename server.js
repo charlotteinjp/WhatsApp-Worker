@@ -20,7 +20,6 @@ const io = new Server(server, {
   }
 });
 
-// Parse JSON bodies
 app.use(express.json());
 
 // Health check
@@ -47,7 +46,7 @@ const whatsappPool = mysql.createPool({
   connectionLimit: 5
 });
 
-// Login route - uses your EXISTING users table
+// Login route
 app.post('/api/login', async (req, res) => {
   const { username, password } = req.body;
   
@@ -67,7 +66,6 @@ app.post('/api/login', async (req, res) => {
     
     const user = users[0];
     
-    // Handle PHP $2y$ format
     let passwordHash = user.password_hash;
     if (passwordHash.startsWith('$2y$')) {
       passwordHash = passwordHash.replace('$2y$', '$2b$');
@@ -90,30 +88,6 @@ app.post('/api/login', async (req, res) => {
     
   } catch (error) {
     console.error('Login error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// Check auth (simple token check - clients send username back)
-app.post('/api/verify', async (req, res) => {
-  const { username } = req.body;
-  
-  if (!username) {
-    return res.status(401).json({ error: 'Not authenticated' });
-  }
-  
-  try {
-    const [users] = await userPool.execute(
-      'SELECT id, username, display_name, admin FROM users WHERE username = ?',
-      [username]
-    );
-    
-    if (users.length > 0) {
-      res.json({ authenticated: true, username: users[0].username });
-    } else {
-      res.json({ authenticated: false });
-    }
-  } catch (error) {
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -157,7 +131,7 @@ async function getRecentMessages(limit = 50) {
   }
 }
 
-// WhatsApp Client
+// WhatsApp Client with Render-compatible Puppeteer config
 const client = new Client({
   authStrategy: new LocalAuth(),
   puppeteer: {
@@ -165,8 +139,14 @@ const client = new Client({
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage'
-    ]
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--single-process'
+    ],
+    // THIS IS THE KEY FIX FOR RENDER
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || 
+      process.env.CHROME_BIN || 
+      null
   }
 });
 
