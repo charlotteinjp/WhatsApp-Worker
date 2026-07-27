@@ -127,15 +127,37 @@ async function getRecentMessages(limit = 50) {
   }
 }
 
-// SIMPLE CONFIG - Let puppeteer handle Chrome
+const fs = require('fs');
+const path = require('path');
+
+// Find Chrome in Render's cache
+function findChrome() {
+  const cachePath = '/opt/render/.cache/puppeteer/chrome';
+  
+  if (fs.existsSync(cachePath)) {
+    const versions = fs.readdirSync(cachePath);
+    for (const version of versions) {
+      const chromePath = path.join(cachePath, version, 'chrome-linux64', 'chrome');
+      if (fs.existsSync(chromePath)) {
+        console.log('Found Chrome at:', chromePath);
+        return chromePath;
+      }
+    }
+  }
+  return null;
+}
+
+// WhatsApp Client
 const client = new Client({
   authStrategy: new LocalAuth(),
   puppeteer: {
     headless: true,
+    executablePath: findChrome() || undefined,
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage'
+      '--disable-dev-shm-usage',
+      '--disable-gpu'
     ]
   }
 });
