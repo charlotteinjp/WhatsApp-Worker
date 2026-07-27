@@ -3,6 +3,7 @@ const { Server } = require('socket.io');
 const http = require('http');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const mysql = require('mysql2/promise');
+const bcrypt = require('bcryptjs');
 
 const app = express();
 const server = http.createServer(app);
@@ -19,48 +20,114 @@ const io = new Server(server, {
   }
 });
 
-// Health check endpoint
+// Parse JSON bodies
+app.use(express.json());
+
+// Health check
 app.get('/', (req, res) => {
-  res.json({ 
-    status: 'WhatsApp Server Running',
-    uptime: process.uptime()
-  });
+  res.json({ status: 'WhatsApp Server Running' });
 });
 
-// Database connection using environment variables
-const pool = mysql.createPool({
+// Database connections
+const userPool = mysql.createPool({
   host: process.env.DB_HOST || 'localhost',
   user: process.env.DB_USER || 'root',
   password: process.env.DB_PASSWORD || '',
-  database: process.env.DB_NAME || 'whatsapp_dashboard',
+  database: process.env.USER_DB_NAME || 'anniethe_radio_playout',
   waitForConnections: true,
-  connectionLimit: 5,
-  connectTimeout: 10000
+  connectionLimit: 5
 });
 
-// Test database connection
-async function testDatabaseConnection() {
-  try {
-    const connection = await pool.getConnection();
-    console.log('✅ Database connected successfully');
-    connection.release();
-    return true;
-  } catch (error) {
-    console.error('❌ Database connection failed:', error.message);
-    return false;
-  }
-}
+const whatsappPool = mysql.createPool({
+  host: process.env.DB_HOST || 'localhost',
+  user: process.env.DB_USER || 'root',
+  password: process.env.DB_PASSWORD || '',
+  database: process.env.WHATSAPP_DB_NAME || 'whatsapp_dashboard',
+  waitForConnections: true,
+  connectionLimit: 5
+});
 
-// Save message to database
+// Login route - uses your EXISTING users table
+app.post('/api/login', async (req, res) => {
+  const { username, password } = req.body;
+  
+  if (!username || !password) {
+    return res.status(400).json({ error: 'Username and password required' });
+  }
+  
+  try {
+    const [users] = await userPool.execute(
+      'SELECT id, username, password_hash, display_name, admin FROM users WHERE username = ?',
+      [username]
+    );
+    
+    if (users.length === 0) {
+      return res.status(401).json({ error: 'Invalid username or password' });
+    }
+    
+    const user = users[0];
+    
+    // Handle PHP $2y$ format
+    let passwordHash = user.password_hash;
+    if (passwordHash.startsWith('$2y$')) {
+      passwordHash = passwordHash.replace('$2y$', '$2b$');
+    }
+    
+    const valid = await bcrypt.compare(password, passwordHash);
+    
+    if (!valid) {
+      return res.status(401).json({ error: 'Invalid username or password' });
+    }
+    
+    console.log(`✅ Login: ${user.username}`);
+    
+    res.json({
+      success: true,
+      username: user.username,
+      displayName: user.display_name || user.username,
+      isAdmin: user.admin === 1
+    });
+    
+  } catch (error) {
+    console.error('Login error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Check auth (simple token check - clients send username back)
+app.post('/api/verify', async (req, res) => {
+  const { username } = req.body;
+  
+  if (!username) {
+    return res.status(401).json({ error: 'Not authenticated' });
+  }
+  
+  try {
+    const [users] = await userPool.execute(
+      'SELECT id, username, display_name, admin FROM users WHERE username = ?',
+      [username]
+    );
+    
+    if (users.length > 0) {
+      res.json({ authenticated: true, username: users[0].username });
+    } else {
+      res.json({ authenticated: false });
+    }
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// WhatsApp message functions
 async function saveMessage(sender, body, timestamp) {
   try {
-    const [existing] = await pool.execute(
+    const [existing] = await whatsappPool.execute(
       'SELECT id FROM whatsapp_messages WHERE sender = ? AND body = ? AND ABS(timestamp - ?) < 2000',
       [sender, body, timestamp]
     );
     
     if (existing.length === 0) {
-      await pool.execute(
+      await whatsappPool.execute(
         'INSERT INTO whatsapp_messages (sender, body, timestamp) VALUES (?, ?, ?)',
         [sender, body, timestamp]
       );
@@ -68,15 +135,14 @@ async function saveMessage(sender, body, timestamp) {
     }
     return false;
   } catch (error) {
-    console.error('Error saving message:', error.message);
+    console.error('Save error:', error.message);
     return false;
   }
 }
 
-// Get recent messages
 async function getRecentMessages(limit = 50) {
   try {
-    const [rows] = await pool.execute(
+    const [rows] = await whatsappPool.execute(
       'SELECT sender, body, timestamp FROM whatsapp_messages ORDER BY timestamp DESC LIMIT ?',
       [limit]
     );
@@ -87,72 +153,39 @@ async function getRecentMessages(limit = 50) {
       isHistorical: true
     }));
   } catch (error) {
-    console.error('Error fetching messages:', error.message);
     return [];
   }
 }
 
-// WhatsApp Client setup
+// WhatsApp Client
 const client = new Client({
-  authStrategy: new LocalAuth({
-    dataPath: process.env.AUTH_PATH || './.wwebjs_auth'
-  }),
+  authStrategy: new LocalAuth(),
   puppeteer: {
     headless: true,
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-gpu'
+      '--disable-dev-shm-usage'
     ]
   }
 });
 
-// WhatsApp Events
 client.on('qr', (qr) => {
-  console.log('\n📱 ======================================');
-  console.log('   SCAN THIS QR CODE WITH WHATSAPP');
-  console.log('========================================\n');
-  
-  // Show QR in terminal
+  console.log('\n📱 SCAN THIS QR CODE WITH WHATSAPP\n');
   try {
     require('qrcode-terminal').generate(qr, { small: true });
   } catch (e) {
-    console.log('QR Code (raw):', qr);
+    console.log('QR:', qr.substring(0, 100) + '...');
   }
-  
-  // Send to all connected browsers
   io.emit('qr', qr);
-  console.log('\nQR sent to connected clients\n');
 });
 
 client.on('ready', () => {
-  console.log('\n✅ WhatsApp is connected and ready!\n');
+  console.log('✅ WhatsApp connected!');
   io.emit('ready');
 });
 
-client.on('authenticated', () => {
-  console.log('🔐 WhatsApp authenticated successfully');
-});
-
-client.on('auth_failure', (msg) => {
-  console.error('❌ Authentication failed:', msg);
-});
-
-client.on('disconnected', (reason) => {
-  console.log('🔌 WhatsApp disconnected:', reason);
-  io.emit('disconnected');
-  
-  // Try to reconnect after 5 seconds
-  setTimeout(() => {
-    console.log('🔄 Attempting to reconnect...');
-    client.initialize();
-  }, 5000);
-});
-
-// Handle incoming messages
 client.on('message', async (message) => {
-  // Only process incoming messages (not sent by us)
   if (!message.fromMe && message.body) {
     try {
       const contact = await message.getContact();
@@ -162,129 +195,40 @@ client.on('message', async (message) => {
       const isNew = await saveMessage(sender, message.body, timestamp);
       
       if (isNew) {
-        const msgData = {
-          sender: sender,
+        io.emit('message', {
+          sender,
           body: message.body,
           timestamp: new Date(timestamp).toISOString(),
           isHistorical: false
-        };
-        
-        // Broadcast to all connected browsers
-        io.emit('message', msgData);
-        
-        console.log(`📨 ${sender}: ${message.body.substring(0, 50)}${message.body.length > 50 ? '...' : ''}`);
-      }
-    } catch (err) {
-      console.error('Error processing message:', err.message);
-    }
-  }
-});
-
-// Handle media messages
-client.on('message_create', async (message) => {
-  if (!message.fromMe && message.type !== 'chat') {
-    try {
-      const contact = await message.getContact();
-      const sender = contact.pushname || contact.name || message.from.split('@')[0];
-      const timestamp = message.timestamp * 1000;
-      
-      let body = message.body || '';
-      if (!body) {
-        // Describe media types
-        switch(message.type) {
-          case 'image': body = '📷 Image'; break;
-          case 'video': body = '🎥 Video'; break;
-          case 'sticker': body = '🏷️ Sticker'; break;
-          case 'audio': body = '🎵 Audio'; break;
-          case 'document': body = '📄 Document'; break;
-          case 'ptt': body = '🎤 Voice Message'; break;
-          default: body = `[${message.type}]`; break;
-        }
-      }
-      
-      await saveMessage(sender, body, timestamp);
-      
-      io.emit('message', {
-        sender: sender,
-        body: body,
-        timestamp: new Date(timestamp).toISOString(),
-        isHistorical: false
-      });
-    } catch (err) {
-      console.error('Error processing media message:', err.message);
-    }
-  }
-});
-
-// Socket.IO connection handling
-io.on('connection', async (socket) => {
-  console.log('🟢 Browser client connected:', socket.id);
-  
-  // Send current state to newly connected client
-  try {
-    if (client.info) {
-      // WhatsApp is connected
-      socket.emit('ready');
-      
-      // Send recent messages from database
-      const recentMessages = await getRecentMessages(50);
-      if (recentMessages.length > 0) {
-        recentMessages.forEach(msg => {
-          socket.emit('message', msg);
         });
-        console.log(`📤 Sent ${recentMessages.length} recent messages to client`);
+        console.log(`📨 ${sender}: ${message.body.substring(0, 50)}`);
       }
-      
-      socket.emit('historyLoaded');
-    } else {
-      // WhatsApp not connected yet
-      socket.emit('status', { message: 'Waiting for WhatsApp connection...' });
+    } catch (err) {
+      console.error('Message error:', err.message);
     }
-  } catch (error) {
-    console.error('Error sending initial data:', error.message);
   }
-  
-  // Handle client disconnection
-  socket.on('disconnect', () => {
-    console.log('🔴 Browser client disconnected:', socket.id);
-  });
-  
-  // Handle errors
-  socket.on('error', (error) => {
-    console.error('Socket error:', error.message);
-  });
 });
 
-// Start the server
+client.on('disconnected', (reason) => {
+  console.log('Disconnected:', reason);
+  setTimeout(() => client.initialize(), 5000);
+});
+
+// Socket.IO
+io.on('connection', async (socket) => {
+  console.log('🟢 Client connected:', socket.id);
+  
+  if (client.info) {
+    socket.emit('ready');
+    const messages = await getRecentMessages(50);
+    messages.forEach(msg => socket.emit('message', msg));
+    socket.emit('historyLoaded');
+  }
+});
+
+// Start
 const PORT = process.env.PORT || 10000;
-
-async function startServer() {
-  // Test database connection first
-  const dbConnected = await testDatabaseConnection();
-  
-  if (!dbConnected) {
-    console.warn('⚠️  Database not connected. Messages will not be saved.');
-    console.warn('Please check your DB_HOST, DB_USER, DB_PASSWORD, DB_NAME environment variables.');
-  }
-  
-  server.listen(PORT, () => {
-    console.log('\n🚀 WhatsApp Server is running!');
-    console.log(`   Port: ${PORT}`);
-    console.log(`   Health check: http://localhost:${PORT}/`);
-    console.log('   Waiting for WhatsApp QR code...\n');
-  });
-  
-  // Initialize WhatsApp client
+server.listen(PORT, () => {
+  console.log(`\n🚀 Server running on port ${PORT}\n`);
   client.initialize();
-}
-
-// Handle graceful shutdown
-process.on('SIGTERM', async () => {
-  console.log('Shutting down gracefully...');
-  await client.destroy();
-  server.close();
-  process.exit(0);
 });
-
-// Start everything
-startServer();
